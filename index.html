@@ -496,7 +496,9 @@ function detectCorners(c, cw, ch, maxSide) {
   { const ang = [0, 1, 2, 3].map(k => { const p0 = out[(k + 3) % 4], p1 = out[k], p2 = out[(k + 1) % 4]; const ax = p0.x - p1.x, ay = p0.y - p1.y, bx = p2.x - p1.x, by = p2.y - p1.y; return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1)))) * 180 / Math.PI; });
     const dd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
     const sw = (dd(out[0], out[1]) + dd(out[3], out[2])) / 2, sh = (dd(out[0], out[3]) + dd(out[1], out[2])) / 2;
-    Object.assign(stats, { angMin: Math.min(...ang), angMax: Math.max(...ang), aspect: Math.max(sw, sh) / Math.max(1, Math.min(sw, sh)) }); }
+    Object.assign(stats, { angMin: Math.min(...ang), angMax: Math.max(...ang), aspect: Math.max(sw, sh) / Math.max(1, Math.min(sw, sh)) });
+    // a region running off the frame is only trusted when it is clearly a sheet-shaped quad
+    if (touch > (w + h) * 2 * 0.2 && (stats.angMin < 76 || stats.angMax > 104 || stats.aspect < 1.2 || stats.aspect > 1.7)) return null; }
   out.found = true; out.stats = stats; return out;
   }
 }
@@ -699,6 +701,23 @@ function render(p) {
     const s = settings.strength; const Tc = Math.round((s <= 50 ? 117 - s * 0.8 : 77 - (s - 50) * 0.45) + Math.max(0, Math.min(15, (0.9 - res) * 60))); // core threshold
     const Ts = 180; const core = new Uint8Array(n);
     for (let i = 0; i < n; i++) core[i] = L[i] < Tc ? 1 : 0;
+    // Printed ink is truly black at its darkest; even hard-pressed pencil keeps some gray (graphite is never as black
+    // as toner). So judge each dark blob by how black its darkest few percent get, relative to the page's print.
+    { const lab = new Int32Array(n), st = new Int32Array(n), list = new Int32Array(n); const info = []; let id = 0, lp = 0;
+      for (let i0 = 0; i0 < n; i0++) { if (!core[i0] || lab[i0]) continue; id++; const start = lp; let sp = 0; st[sp++] = i0; lab[i0] = id;
+        while (sp) { const q = st[--sp]; list[lp++] = q; const x = q % W;
+          if (x > 0 && core[q - 1] && !lab[q - 1]) { lab[q - 1] = id; st[sp++] = q - 1; } if (x < W - 1 && core[q + 1] && !lab[q + 1]) { lab[q + 1] = id; st[sp++] = q + 1; }
+          if (q >= W && core[q - W] && !lab[q - W]) { lab[q - W] = id; st[sp++] = q - W; } if (q + W < n && core[q + W] && !lab[q + W]) { lab[q + W] = id; st[sp++] = q + W; } }
+        const sz = lp - start; const hst = new Uint16Array(Tc + 1); for (let k = start; k < lp; k++) hst[L[list[k]]]++;
+        let acc = 0, p3 = 0; const lim = Math.max(1, Math.ceil(sz * 0.03)); for (; p3 < Tc; p3++) { acc += hst[p3]; if (acc >= lim) break; }
+        info.push([start, lp, p3]); }
+      // the page's print level: darkness reached by the blackest 30% of dark pixels' blobs
+      const order = info.slice().sort((a, b) => a[2] - b[2]); const tot = lp; let acc = 0, P = 0;
+      for (const c of order) { acc += c[1] - c[0]; if (acc >= tot * 0.3) { P = c[2]; break; } }
+      const Td = P + 28 + (50 - s) * 0.3;
+      // small print (labels, units, kana with thin strokes) blurs lighter in a photo: give it more room
+      for (const [a, b2, p3] of info) { const sz = b2 - a; if (sz >= 12 && p3 > Math.min(Tc - 6, Td + (sz < 100 ? 14 : 0))) for (let k = a; k < b2; k++) core[list[k]] = 0; }
+    }
     // printed frames and rules: long straight horizontal/vertical runs are kept even when they are lighter than Tc,
     // so strong erasing does not break them into dashes (handwriting is rarely that long and straight)
     { const Tl = Math.max(Tc, Math.min(160, Math.round(117 + Math.max(0, Math.min(15, (0.9 - res) * 60))) + 25));
