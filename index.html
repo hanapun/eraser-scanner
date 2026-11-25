@@ -164,6 +164,9 @@ input[type=text]{font:inherit;font-size:16px;padding:10px 12px;border:1px solid 
 .lview video,.lview canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .lx{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));left:max(14px,env(safe-area-inset-left,0px));width:48px;height:48px;border:0;border-radius:10px;background:#0008;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .lmsg{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);background:#000a;color:#fff;padding:10px 18px;border-radius:8px;font-size:15px;white-space:nowrap;max-width:90%;overflow:hidden;text-overflow:ellipsis}
+.lhq{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));right:max(14px,env(safe-area-inset-right,0px));background:#0008;color:#fff;border-radius:10px;padding:6px 12px;font-size:14px;font-weight:700;display:flex;flex-direction:column;align-items:center;cursor:pointer;min-height:48px;justify-content:center}
+.lhq small{font-size:10px;font-weight:500;opacity:.8}
+.lhq input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 .lseg{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:flex;background:#000a;border-radius:99px;padding:4px}
 .lseg button{border:0;background:none;color:#fff;font:inherit;font-size:16px;font-weight:700;padding:7px 18px;border-radius:99px;cursor:pointer;opacity:.75}
 .lseg button.on{background:#ffffff33;opacity:1}
@@ -334,6 +337,7 @@ input[type=text]{font:inherit;font-size:16px;padding:10px 12px;border:1px solid 
     <div class="flash" id="liveFlash"></div>
     <button class="lx" id="liveClose" type="button" aria-label="閉じる"><svg viewBox="0 0 24 24" width="26" height="26" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19"/></svg></button>
     <div class="lmsg" id="liveStatus">紙をうつしてください</div>
+    <label class="lhq" for="camHQ">高画質で撮る<small id="liveRes"></small><input id="camHQ" type="file" accept="image/*" capture="environment"></label>
     <div class="lseg" role="group" aria-label="撮影モード"><button type="button" id="lmSingle" class="on">単一</button><button type="button" id="lmMulti">連続</button></div>
   </div>
   <div class="lctl">
@@ -504,15 +508,21 @@ function refineQuad(lab, id, w, h, s, q0) {
       const [u, v] = inv(px, py); const along = k === 0 ? u : k === 1 ? v : k === 2 ? u : v; const off = k === 0 ? v : k === 1 ? u - 1 : k === 2 ? v - 1 : u;
       if (along < 0 || along >= 1 || Math.abs(off) > 0.08) return; bins[Math.min(N - 1, (along * N) | 0)].push(off);
     });
-    let vals = bins.map(b => b.length >= 2 ? b.sort((a, c) => a - c)[b.length >> 1] : null);
-    if (vals.filter(v => v !== null).length < N * 0.6) return null;
-    // fill gaps
-    for (let i = 0; i < N; i++) if (vals[i] === null) { let a = i - 1, b = i + 1; while (a >= 0 && vals[a] === null) a--; while (b < N && vals[b] === null) b++; vals[i] = a < 0 ? vals[b] : b >= N ? vals[a] : vals[a] + (vals[b] - vals[a]) * (i - a) / (b - a); }
-    for (let pass = 0; pass < 2; pass++) vals = vals.map((v, i) => (vals[Math.max(0, i - 1)] + v + vals[Math.min(N - 1, i + 1)]) / 3);
-    // keep the corners fixed: remove the straight part through the two ends
-    const e0 = vals[0], e1 = vals[N - 1]; vals = vals.map((v, i) => v - (e0 + (e1 - e0) * i / (N - 1)));
-    vals = vals.map(v => Math.max(-0.05, Math.min(0.05, v)));
-    return Math.max(...vals.map(Math.abs)) < 0.004 ? null : vals;
+    const xs = [], ys = [];
+    bins.forEach((b, i) => { if (b.length >= 2) { b.sort((a, c) => a - c); xs.push((i + 0.5) / N); ys.push(b[b.length >> 1]); } });
+    if (xs.length < N * 0.8) return null; // too much of this edge is hidden or unclear
+    // Only a single smooth bow is corrected (a bent sheet). Fit y = c0 + c1 x + c2 x^2.
+    let S = [0, 0, 0, 0, 0], T = [0, 0, 0];
+    xs.forEach((x, i) => { let p = 1; for (let k = 0; k < 5; k++) { S[k] += p; if (k < 3) T[k] += p * ys[i]; p *= x; } });
+    const A = [[S[0], S[1], S[2]], [S[1], S[2], S[3]], [S[2], S[3], S[4]]];
+    const det3 = m => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    const D = det3(A); if (Math.abs(D) < 1e-12) return null;
+    const col = (m, j) => m.map((r, i) => r.map((v, k) => k === j ? T[i] : v));
+    const c0 = det3(col(A, 0)) / D, c1 = det3(col(A, 1)) / D, c2 = det3(col(A, 2)) / D;
+    let rss = 0; xs.forEach((x, i) => { const e = ys[i] - (c0 + c1 * x + c2 * x * x); rss += e * e; });
+    const rms = Math.sqrt(rss / xs.length), bow = Math.abs(c2) / 4; // largest gap between the arc and its chord
+    if (rms > 0.0035 || bow < 0.006 || bow > 0.06) return null; // wavy/noisy edge, or practically straight
+    return Array.from({ length: N }, (_, i) => { const x = (i + 0.5) / N; return c2 * (x * x - x); });
   };
   const touchesFrame = k => { const a = Qr[k], b = Qr[(k + 1) % 4], m = 2; return (a.x < m && b.x < m) || (a.y < m && b.y < m) || (a.x > w - m && b.x > w - m) || (a.y > h - m && b.y > h - m); };
   const cv = [0, 1, 2, 3].map(k => touchesFrame(k) ? null : sideCurve(pts[k], k));
@@ -638,12 +648,16 @@ function render(p) {
   } else if (mode === "clean") {
     for (let i = 0; i < n; i++) { let v = L[i]; v = v > 215 ? 255 : Math.max(0, (v - 20) * 255 / 195); const o = i * 4; out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255; }
   } else {
-    const s = settings.strength; const Tc = Math.round(120 - s * 0.8); // core threshold 120..40
+    // a low-resolution photo (e.g. a camera-preview frame) blurs thin printed lines into gray: be gentler then
+    const qd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y), pc = p.corners;
+    const srcLong = Math.max((qd(pc[0], pc[1]) + qd(pc[3], pc[2])) / 2, (qd(pc[0], pc[3]) + qd(pc[1], pc[2])) / 2);
+    const res = srcLong / Math.max(W, H); // < 1 means the page was enlarged
+    const s = settings.strength; const Tc = Math.round(120 - s * 0.8 + Math.max(0, Math.min(35, (0.95 - res) * 90))); // core threshold
     const Ts = 200; const core = new Uint8Array(n);
     for (let i = 0; i < n; i++) core[i] = L[i] < Tc ? 1 : 0;
     // drop tiny isolated core specks (pencil dots, noise)
     // dilate core by 2px (separable)
-    const r = 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
+    const r = res < 0.75 ? 3 : 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
     for (let y = 0; y < H; y++) { const row = y * W; for (let x = 0; x < W; x++) { let h = 0; for (let k = -r; k <= r && !h; k++) { const xx = x + k; if (xx >= 0 && xx < W) h = core[row + xx]; } tmp[row + x] = h; } }
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let h = 0; for (let k = -r; k <= r && !h; k++) { const yy = y + k; if (yy >= 0 && yy < H) h = tmp[yy * W + x]; } near[y * W + x] = h; }
     for (let i = 0; i < n; i++) {
@@ -1072,12 +1086,13 @@ function liveTick() {
   if (!live.stream) return;
   const v = $("#liveVideo"); const vw = v.videoWidth, vh = v.videoHeight;
   if (vw && vh) {
-    const q = detectCorners(v, vw, vh, 240); const diag = Math.hypot(vw, vh);
+    const q = detectCorners(v, vw, vh, 240); delete q.curve; const diag = Math.hypot(vw, vh);
     if (q.found) {
       live.stable = qDist(q, live.prev) < diag * 0.012 ? live.stable + 1 : 0; live.miss = 0;
       if (!live.armed && qDist(q, live.shotQ) > diag * 0.08) live.armed = true;
     } else { live.stable = 0; if (++live.miss >= 3) live.armed = true; }
     live.prev = q.found ? q : null; live.last = q;
+    $("#liveRes").textContent = `映像 ${vw}×${vh}`;
     $("#liveStatus").textContent = !q.found ? "用紙の全体がうつるようにしてください" : !live.armed ? "撮影しました。次の用紙に替えてください" : live.stable >= 1 ? "撮影しています…そのままで" : "用紙を見つけました";
     const k = live.armed && q.found ? Math.min(1, live.stable / NEED_STABLE) : 0;
     $("#ring").setAttribute("stroke-dashoffset", String(238.8 * (1 - k)));
@@ -1097,8 +1112,12 @@ function drawLive(q, vw, vh) {
 function liveCapture(q) {
   const v = $("#liveVideo"); const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
   const c = canvasFromSource(v, vw, vh); const s = c.width / vw;
-  let corners;
-  if (q && q.found) { corners = q.map(p => ({ x: p.x * s, y: p.y * s })); corners.curve = q.curve; } else corners = detectCorners(c, 0, 0, 520);
+  let corners = detectCorners(c, 0, 0, 520);
+  if (q && q.found) {
+    const lq = q.map(p => ({ x: p.x * s, y: p.y * s })), diag = Math.hypot(c.width, c.height);
+    // the sharper still-frame result wins when it agrees with what the viewfinder showed
+    if (!corners.found || qDist(corners, lq) > diag * 0.03) corners = lq;
+  }
   addPage(c, false, null, corners);
   live.count++; live.armed = false; live.shotQ = q && q.found ? q : null; live.stable = 0;
   $("#liveCount").textContent = String(live.count); $("#liveDone").hidden = false;
@@ -1112,6 +1131,7 @@ if (liveOK) {
 $("#liveDone").onclick = stopLive; $("#liveClose").onclick = stopLive;
 $("#liveShot").onclick = () => liveCapture(live.last);
 $("#lmSingle").onclick = () => setLiveMode(false); $("#lmMulti").onclick = () => setLiveMode(true);
+$("#camHQ").addEventListener("change", e => { const fl = [...e.target.files]; e.target.value = ""; stopLive(); handleFiles(fl); });
 $("#pick2").addEventListener("change", e => { const fl = [...e.target.files]; e.target.value = ""; stopLive(); handleFiles(fl); });
 
 /* ---------- sample page (shown until the first real photo) ---------- */
