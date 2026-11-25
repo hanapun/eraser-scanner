@@ -436,10 +436,21 @@ function detectCorners(c, cw, ch, maxSide) {
   let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
   let sB = 0, wB = 0, best = 0, th = 128;
   for (let i = 0; i < 256; i++) { wB += hist[i]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += i * hist[i]; const mB = sB / wB, mF = (sum - sB) / wF; const bt = wB * wF * (mB - mF) * (mB - mF); if (bt > best) { best = bt; th = i; } }
+  // Otsu often splits a sheet with a sunlit band and a shaded part. Also try the split inside the darker class
+  // (shaded paper vs. table) and take the largest sheet that still looks like a clean quadrilateral.
+  let s2 = 0, n2 = 0; for (let i = 0; i <= th; i++) { s2 += i * hist[i]; n2 += hist[i]; }
+  let sB2 = 0, wB2 = 0, best2 = 0, th2 = th;
+  for (let i = 0; i <= th; i++) { wB2 += hist[i]; if (!wB2) continue; const wF = n2 - wB2; if (!wF) break; sB2 += i * hist[i]; const mB = sB2 / wB2, mF = (s2 - sB2) / wF; const bt = wB2 * wF * (mB - mF) * (mB - mF); if (bt > best2) { best2 = bt; th2 = i; } }
+  const fallback = () => { const mx = cw * 0.015, my = ch * 0.015; const r = [{ x: mx, y: my }, { x: cw - mx, y: my }, { x: cw - mx, y: ch - my }, { x: mx, y: ch - my }]; r.found = false; return r; };
+  let pick = null;
+  for (const t of [...new Set([th, Math.round((th + th2) / 2), th2])]) { const r = quadAt(t); if (r && (!pick || r.stats.area > pick.stats.area * 1.08)) pick = r; }
+  return pick || fallback();
+  function quadAt(th) {
   const m = new Uint8Array(n); for (let i = 0; i < n; i++) m[i] = v[i] > th ? 1 : 0;
   // close small holes (text on paper): dilate then erode, radius 2
   const morph = (a, r, dil) => { const o = new Uint8Array(n); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let hit = dil ? 0 : 1; for (let k = -r; k <= r && (dil ? !hit : hit); k++) { const xx = Math.min(w - 1, Math.max(0, x + k)); hit = a[y * w + xx]; } o[y * w + x] = hit; } const o2 = new Uint8Array(n); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let hit = dil ? 0 : 1; for (let k = -r; k <= r && (dil ? !hit : hit); k++) { const yy = Math.min(h - 1, Math.max(0, y + k)); hit = o[yy * w + x]; } o2[y * w + x] = hit; } return o2; };
-  const mm = morph(morph(m, 2, true), 2, false);
+  // close small holes (text), then open to cut thin bridges to things lying next to the sheet
+  const mm = morph(morph(morph(morph(m, 2, true), 2, false), 3, false), 3, true);
   // largest component
   const lab = new Int32Array(n); let bestId = 0, bestSize = 0, id = 0; const st = new Int32Array(n);
   for (let i = 0; i < n; i++) {
@@ -451,8 +462,7 @@ function detectCorners(c, cw, ch, maxSide) {
       if (y < h - 1 && mm[q + w] && !lab[q + w]) { lab[q + w] = id; st[sp++] = q + w; } }
     if (size > bestSize) { bestSize = size; bestId = id; }
   }
-  const fallback = () => { const mx = cw * 0.015, my = ch * 0.015; const r = [{ x: mx, y: my }, { x: cw - mx, y: my }, { x: cw - mx, y: ch - my }, { x: mx, y: ch - my }]; r.found = false; return r; };
-  if (bestSize < n * 0.15) return fallback();
+  if (bestSize < n * 0.15) return null;
   // extreme points
   let tl, tr, br, bl, a = 1e9, b = -1e9, cc = -1e9, dd = 1e9; let touch = 0;
   for (let i = 0; i < n; i++) { if (lab[i] !== bestId) continue; const x = i % w, y = (i / w) | 0;
@@ -460,13 +470,13 @@ function detectCorners(c, cw, ch, maxSide) {
     const s1 = x + y, s2 = x - y;
     if (s1 < a) { a = s1; tl = [x, y]; } if (s1 > b) { b = s1; br = [x, y]; }
     if (s2 > cc) { cc = s2; tr = [x, y]; } if (s2 < dd) { dd = s2; bl = [x, y]; } }
-  if (bestSize > n * 0.97) return fallback();
+  if (bestSize > n * 0.97) return null;
   // paper runs off the frame (photo taken close up): trust the whole frame
-  if (touch > (w + h) * 2 * 0.25) return fallback();
+  if (touch > (w + h) * 2 * 0.5) return null;
   const q = [tl, tr, br, bl].map(([x, y]) => ({ x: (x + 0.5) / s, y: (y + 0.5) / s }));
-  const area = Math.abs(polyArea(q)); if (area < cw * ch * 0.15) return fallback();
+  const area = Math.abs(polyArea(q)); if (area < cw * ch * 0.15) return null;
   // the bright region must actually look like a quadrilateral
-  if (bestSize / (area * s * s) < 0.85) return fallback();
+  if (bestSize / (area * s * s) < 0.85) return null;
   // how much it looks like a printed sheet (used to keep auto capture from firing on walls, windows, desks...)
   const stats = (() => {
     const hi = new Uint32Array(256); let oS = 0, oN = 0, inN = 0; const e = 2, inC = i => lab[i] === bestId;
@@ -488,12 +498,13 @@ function detectCorners(c, cw, ch, maxSide) {
     const sw = (dd(out[0], out[1]) + dd(out[3], out[2])) / 2, sh = (dd(out[0], out[3]) + dd(out[1], out[2])) / 2;
     Object.assign(stats, { angMin: Math.min(...ang), angMax: Math.max(...ang), aspect: Math.max(sw, sh) / Math.max(1, Math.min(sw, sh)) }); }
   out.found = true; out.stats = stats; return out;
+  }
 }
 /* A detected quad is trusted for automatic capture only when it looks like a printed sheet:
    bright and clearly lighter than its surroundings, with some ink on it, a sheet-like shape and near-right corners. */
 function paperLike(q) {
   const t = q && q.found && q.stats; if (!t) return false;
-  return t.contrast >= 35 && t.med >= 120 && t.bright >= 0.55 && t.ink >= 0.005 && t.ink <= 0.4 &&
+  return t.contrast >= 35 && t.med >= 120 && t.bright >= 0.35 && t.ink >= 0.005 && t.ink <= 0.6 &&
     t.area <= 0.92 && t.angMin >= 62 && t.angMax <= 118 && t.aspect >= 1.15 && t.aspect <= 2.0;
 }
 /* Fit a straight line to each paper edge (sharper corners than the extreme points),
@@ -511,17 +522,24 @@ function refineQuad(lab, id, w, h, s, q0) {
   }
   // total least squares line through the middle part of each edge
   const lines = pts.map(arr => {
-    const m = arr.filter(p => p[2] > 0.1 && p[2] < 0.9); if (m.length < 15) return null;
-    let mx = 0, my = 0; m.forEach(p => { mx += p[0]; my += p[1]; }); mx /= m.length; my /= m.length;
-    let sxx = 0, syy = 0, sxy = 0; m.forEach(p => { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; });
-    const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); return { mx, my, dx: Math.cos(ang), dy: Math.sin(ang) };
+    let m = arr.filter(p => p[2] > 0.1 && p[2] < 0.9); if (m.length < 15) return null;
+    const fit = m => { let mx = 0, my = 0; m.forEach(p => { mx += p[0]; my += p[1]; }); mx /= m.length; my /= m.length;
+      let sxx = 0, syy = 0, sxy = 0; m.forEach(p => { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; });
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); return { mx, my, dx: Math.cos(ang), dy: Math.sin(ang) }; };
+    // robust: things touching the sheet (a book, a mat) bulge out of the edge, so drop far points and refit
+    let l = fit(m);
+    for (let it = 0; it < 3; it++) {
+      const r = m.map(p => Math.abs((p[0] - l.mx) * l.dy - (p[1] - l.my) * l.dx)); const srt = r.slice().sort((a, b) => a - b); const med = srt[srt.length >> 1];
+      const keep = m.filter((p, i) => r[i] <= Math.max(1, med * 2.5)); if (keep.length < 15 || keep.length === m.length) break; m = keep; l = fit(m);
+    }
+    return l;
   });
   let Q = P;
   if (lines.every(Boolean)) {
     const X = (l1, l2) => { const den = l1.dx * l2.dy - l1.dy * l2.dx; if (Math.abs(den) < 1e-6) return null; const t = ((l2.mx - l1.mx) * l2.dy - (l2.my - l1.my) * l2.dx) / den; return { x: l1.mx + t * l1.dx, y: l1.my + t * l1.dy }; };
     const R = [X(lines[3], lines[0]), X(lines[0], lines[1]), X(lines[1], lines[2]), X(lines[2], lines[3])];
     const diag = Math.hypot(w, h);
-    if (R.every((c, k) => c && Math.hypot(c.x - P[k].x, c.y - P[k].y) < diag * 0.06 && c.x > -w * 0.05 && c.x < w * 1.05 && c.y > -h * 0.05 && c.y < h * 1.05)) Q = R;
+    if (R.every((c, k) => c && Math.hypot(c.x - P[k].x, c.y - P[k].y) < diag * 0.12 && c.x > -w * 0.05 && c.x < w * 1.05 && c.y > -h * 0.05 && c.y < h * 1.05)) Q = R;
   }
   // edge bending, measured in the flattened (unit square) coordinates of a reference quad
   const N = 24;
@@ -555,7 +573,8 @@ function refineQuad(lab, id, w, h, s, q0) {
   };
   let curve = curvesFor(Q);
   // a bent edge pulls the fitted line away from the real corner: then trust the extreme-point corners
-  if (curve && Q !== P) { Q = P; curve = curvesFor(P); }
+  // (but if an extreme point sits far off the fitted corner, something lies against the sheet there: keep the lines, no bend)
+  if (curve && Q !== P) { const dg = Math.hypot(w, h); if (Q.every((c, k) => Math.hypot(c.x - P[k].x, c.y - P[k].y) < dg * 0.025)) { Q = P; curve = curvesFor(P); } else curve = null; }
   const out = Q.map(p => ({ x: Math.max(0, p.x / s), y: Math.max(0, p.y / s) }));
   if (curve) out.curve = curve;
   return out;
@@ -611,7 +630,7 @@ function warp(p, W, H) {
       const b = sd[i0 + 2] * w00 + sd[i0 + 6] * w10 + sd[i1 + 2] * w01 + sd[i1 + 6] * w11;
       const mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
       const o = y * W + x; gray[o] = mn; // darkest channel: colored print stays dark
-      if (mx - mn > 45 && (mx - mn) > mx * 0.28) col[o] = (r >= mx - 1 && r > g * 1.25 && r > b * 1.15) ? 1 : 2;
+      if ((mx - mn > 45 && (mx - mn) > mx * 0.28) || (mx - mn > 22 && (mx - mn) > mx * 0.4)) col[o] = (r >= mx - 1 && r > g * 1.25 && r > b * 1.15) ? 1 : 2; // the second test: dark red ink in shade
     }
   }
   return { gray, col };
@@ -655,7 +674,7 @@ function render(p) {
     for (let y = 0; y < H; y += 2) { const by = (y / B) | 0; for (let x = 0; x < W; x += 2) { const j = by * bw + ((x / B) | 0); if (L[y * W + x] < mn[j]) mn[j] = L[y * W + x]; } }
     const R2 = 4, t2 = new Float32Array(bw * bh);
     for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let m = 255; for (let k = -R2; k <= R2; k++) { const xx = x + k; if (xx >= 0 && xx < bw && mn[y * bw + xx] < m) m = mn[y * bw + xx]; } t2[y * bw + x] = m; }
-    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let m = 255; for (let k = -R2; k <= R2; k++) { const yy = y + k; if (yy >= 0 && yy < bh && t2[yy * bw + x] < m) m = t2[yy * bw + x]; } mn[y * bw + x] = Math.max(d, Math.min(d + 40, m)); }
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let m = 255; for (let k = -R2; k <= R2; k++) { const yy = y + k; if (yy >= 0 && yy < bh && t2[yy * bw + x] < m) m = t2[yy * bw + x]; } mn[y * bw + x] = Math.max(d, Math.min(d + 70, m)); }
     for (let pass = 0; pass < 3; pass++) { const o = new Float32Array(bw * bh); for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let s = 0, c = 0; for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j; if (xx >= 0 && yy >= 0 && xx < bw && yy < bh) { s += mn[yy * bw + xx]; c++; } } o[y * bw + x] = s / c; } mn = o; }
     for (let y = 0; y < H; y++) {
       const fy = Math.min(bh - 1.001, Math.max(0, (y + 0.5) / B - 0.5)); const y0 = fy | 0, ay = fy - y0;
