@@ -122,6 +122,21 @@ details ul{padding-left:1.2em;margin:6px 0}
 .fab:focus-within{outline:3px solid var(--ink);outline-offset:3px}
 .sheet{position:fixed;inset:0;z-index:25;background:rgba(10,14,25,.45);display:flex;align-items:flex-end;justify-content:center}
 .sheetbody{background:var(--card);width:100%;max-width:680px;max-height:88vh;overflow:auto;border-radius:22px 22px 0 0;padding:10px max(16px,env(safe-area-inset-left,0px)) calc(18px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:16px}
+.shgrid{display:flex;flex-direction:column;gap:10px}
+.shbtn{appearance:none;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;text-align:left;border-radius:14px;padding:12px 14px;display:grid;grid-template-columns:44px 1fr;column-gap:12px;align-items:center;cursor:pointer;min-height:64px}
+.shbtn span{font-weight:700;font-size:15px}
+.shbtn small{grid-column:2;color:var(--sub);font-size:12px}
+.shbtn[disabled]{opacity:.55}
+.shi{grid-row:span 2;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-style:normal;font-weight:800;font-size:12px;color:#fff}
+.shi.pdf{background:#e25b4f}.shi.jpg{background:#3fa36b}.shi.prt{background:var(--accent)}
+#printArea{display:none}
+@media print{
+  @page{size:A4 portrait;margin:0}
+  body>*:not(#printArea){display:none!important}
+  :root,body{padding:0!important;margin:0!important;background:#fff!important}
+  #printArea{display:block!important}
+  #printArea img{display:block;width:210mm;height:296mm;object-fit:contain;page-break-after:always;break-after:page}
+}
 .grab{width:40px;height:5px;border-radius:3px;background:var(--line);align-self:center}
 .sheetsec{display:flex;flex-direction:column;gap:12px}
 .stack{display:flex;flex-direction:column;gap:18px}
@@ -229,10 +244,7 @@ input[type=text]{font:inherit;font-size:16px;padding:10px 12px;border:1px solid 
       <div class="addtag"><input id="newTag" type="text" placeholder="新しいタグ" autocomplete="off"><button class="btn small" id="addTag" type="button">追加</button></div></div>
     <button class="btn primary" id="saveLib" type="button">一覧に保存</button>
     <p class="hint" id="saveNote"></p>
-    <div class="btnrow">
-      <button class="btn small" id="savePdf" type="button">PDFを書き出す</button>
-      <button class="btn small" id="saveJpg" type="button">このページをJPGで</button>
-    </div>
+    <button class="btn" id="shareCur" type="button">保存・印刷・共有（PDF / JPG）</button>
   </section>
 
   <details class="panel">
@@ -285,6 +297,21 @@ input[type=text]{font:inherit;font-size:16px;padding:10px 12px;border:1px solid 
     <button class="btn" type="button" data-close>閉じる</button>
   </div>
 </div>
+
+<div class="sheet" id="shareSheet" hidden>
+  <div class="sheetbody" role="dialog" aria-modal="true" aria-labelledby="shTitle">
+    <div class="grab"></div>
+    <div><h2 id="shTitle">保存・共有</h2><p class="sub" id="shInfo"></p></div>
+    <div class="shgrid">
+      <button class="shbtn" id="shPdf" type="button" data-label="PDFで保存・共有"><i class="shi pdf">PDF</i><span>PDFで保存・共有</span><small>ファイルに保存、LINE、メール、AirDropなど</small></button>
+      <button class="shbtn" id="shJpg" type="button" data-label="JPGで保存・共有"><i class="shi jpg">JPG</i><span>JPGで保存・共有</span><small>ページごとの画像。「画像を保存」で写真アプリへ</small></button>
+      <button class="shbtn" id="shPrint" type="button" data-label="印刷する"><i class="shi prt"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" aria-hidden="true"><path d="M7 9V3h10v6M7 17H4v-7h16v7h-3"/><path d="M7 14h10v7H7z"/></svg></i><span>印刷する</span><small>AirPrint対応プリンターにA4で印刷</small></button>
+    </div>
+    <p class="hint" id="shNote"></p>
+    <button class="btn" type="button" data-close>閉じる</button>
+  </div>
+</div>
+<div id="printArea" aria-hidden="true"></div>
 
 <div class="sheet" id="itemSheet" hidden>
   <div class="sheetbody" role="dialog" aria-modal="true" aria-labelledby="itTitle">
@@ -382,8 +409,8 @@ $("#pick").addEventListener("change", e => { handleFiles(e.target.files); e.targ
 
 /* ---------- page model ---------- */
 function addPage(src, isPdf, label, given) {
-  const corners = given || (isPdf ? fullCorners(src) : detectCorners(src));
-  const p = { id: ++uid, src, corners, label: label || "", out: null, busy: false, srcData: null };
+  const corners = given || (isPdf ? fullCorners(src) : detectCorners(src, 0, 0, 520));
+  const p = { id: ++uid, src, corners, curve: corners.curve || null, label: label || "", out: null, busy: false, srcData: null };
   // drop the sample page once the user adds their own
   if (!label) { const si = pages.findIndex(x => x.label); if (si >= 0) pages.splice(si, 1); }
   pages.push(p); cur = pages.length - 1; process(p); renderList(); openEditor();
@@ -436,7 +463,79 @@ function detectCorners(c, cw, ch, maxSide) {
   const area = Math.abs(polyArea(q)); if (area < cw * ch * 0.15) return fallback();
   // the bright region must actually look like a quadrilateral
   if (bestSize / (area * s * s) < 0.85) return fallback();
-  q.found = true; return q;
+  let out = q;
+  try { out = refineQuad(lab, bestId, w, h, s, q) || q; } catch (e) { console.error(e); }
+  out.found = true; return out;
+}
+/* Fit a straight line to each paper edge (sharper corners than the extreme points),
+   then measure how far each edge bends away from that line (curled or wavy paper). */
+function refineQuad(lab, id, w, h, s, q0) {
+  const P = q0.map(p => ({ x: p.x * s, y: p.y * s })); // small-image coords
+  const pts = [[], [], [], []];
+  const segD = (px, py, a, b) => { const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy; let t = ((px - a.x) * dx + (py - a.y) * dy) / L2; const tt = t; t = Math.max(0, Math.min(1, t)); return [Math.hypot(px - a.x - t * dx, py - a.y - t * dy), tt]; };
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x; if (lab[i] !== id) continue;
+    if (lab[i - 1] === id && lab[i + 1] === id && lab[i - w] === id && lab[i + w] === id) continue;
+    const px = x + 0.5, py = y + 0.5; let best = 1e9, bs = -1, bt = 0;
+    for (let k = 0; k < 4; k++) { const [d, t] = segD(px, py, P[k], P[(k + 1) % 4]); if (d < best) { best = d; bs = k; bt = t; } }
+    if (bs >= 0 && best < Math.max(w, h) * 0.08) pts[bs].push([px, py, bt]);
+  }
+  // total least squares line through the middle part of each edge
+  const lines = pts.map(arr => {
+    const m = arr.filter(p => p[2] > 0.1 && p[2] < 0.9); if (m.length < 15) return null;
+    let mx = 0, my = 0; m.forEach(p => { mx += p[0]; my += p[1]; }); mx /= m.length; my /= m.length;
+    let sxx = 0, syy = 0, sxy = 0; m.forEach(p => { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; });
+    const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); return { mx, my, dx: Math.cos(ang), dy: Math.sin(ang) };
+  });
+  let Q = P;
+  if (lines.every(Boolean)) {
+    const X = (l1, l2) => { const den = l1.dx * l2.dy - l1.dy * l2.dx; if (Math.abs(den) < 1e-6) return null; const t = ((l2.mx - l1.mx) * l2.dy - (l2.my - l1.my) * l2.dx) / den; return { x: l1.mx + t * l1.dx, y: l1.my + t * l1.dy }; };
+    const R = [X(lines[3], lines[0]), X(lines[0], lines[1]), X(lines[1], lines[2]), X(lines[2], lines[3])];
+    const diag = Math.hypot(w, h);
+    if (R.every((c, k) => c && Math.hypot(c.x - P[k].x, c.y - P[k].y) < diag * 0.06 && c.x > -w * 0.05 && c.x < w * 1.05 && c.y > -h * 0.05 && c.y < h * 1.05)) Q = R;
+  }
+  // edge bending, measured in the flattened (unit square) coordinates of a reference quad
+  const N = 24;
+  const curvesFor = Qr => {
+  const inv = invQuadMap(quadMap(Qr)); if (!inv) return null;
+  const sideCurve = (arr, k) => {
+    const bins = Array.from({ length: N }, () => []);
+    arr.forEach(([px, py]) => {
+      const [u, v] = inv(px, py); const along = k === 0 ? u : k === 1 ? v : k === 2 ? u : v; const off = k === 0 ? v : k === 1 ? u - 1 : k === 2 ? v - 1 : u;
+      if (along < 0 || along >= 1 || Math.abs(off) > 0.08) return; bins[Math.min(N - 1, (along * N) | 0)].push(off);
+    });
+    let vals = bins.map(b => b.length >= 2 ? b.sort((a, c) => a - c)[b.length >> 1] : null);
+    if (vals.filter(v => v !== null).length < N * 0.6) return null;
+    // fill gaps
+    for (let i = 0; i < N; i++) if (vals[i] === null) { let a = i - 1, b = i + 1; while (a >= 0 && vals[a] === null) a--; while (b < N && vals[b] === null) b++; vals[i] = a < 0 ? vals[b] : b >= N ? vals[a] : vals[a] + (vals[b] - vals[a]) * (i - a) / (b - a); }
+    for (let pass = 0; pass < 2; pass++) vals = vals.map((v, i) => (vals[Math.max(0, i - 1)] + v + vals[Math.min(N - 1, i + 1)]) / 3);
+    // keep the corners fixed: remove the straight part through the two ends
+    const e0 = vals[0], e1 = vals[N - 1]; vals = vals.map((v, i) => v - (e0 + (e1 - e0) * i / (N - 1)));
+    vals = vals.map(v => Math.max(-0.05, Math.min(0.05, v)));
+    return Math.max(...vals.map(Math.abs)) < 0.004 ? null : vals;
+  };
+  const touchesFrame = k => { const a = Qr[k], b = Qr[(k + 1) % 4], m = 2; return (a.x < m && b.x < m) || (a.y < m && b.y < m) || (a.x > w - m && b.x > w - m) || (a.y > h - m && b.y > h - m); };
+  const cv = [0, 1, 2, 3].map(k => touchesFrame(k) ? null : sideCurve(pts[k], k));
+  return cv.some(Boolean) ? { t: cv[0], r: cv[1], b: cv[2], l: cv[3], n: N } : null;
+  };
+  let curve = curvesFor(Q);
+  // a bent edge pulls the fitted line away from the real corner: then trust the extreme-point corners
+  if (curve && Q !== P) { Q = P; curve = curvesFor(P); }
+  const out = Q.map(p => ({ x: Math.max(0, p.x / s), y: Math.max(0, p.y / s) }));
+  if (curve) out.curve = curve;
+  return out;
+}
+function invQuadMap(M) {
+  const A = [[M.a, M.b, M.c], [M.d, M.e, M.f], [M.g, M.h, 1]];
+  const [[a, b, c], [d, e, f], [g, h, i]] = A;
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g); if (Math.abs(det) < 1e-12) return null;
+  const I = [[(e * i - f * h), -(b * i - c * h), (b * f - c * e)], [-(d * i - f * g), (a * i - c * g), -(a * f - c * d)], [(d * h - e * g), -(a * h - b * g), (a * e - b * d)]].map(r => r.map(x => x / det));
+  return (x, y) => { const W = I[2][0] * x + I[2][1] * y + I[2][2]; return [(I[0][0] * x + I[0][1] * y + I[0][2]) / W, (I[1][0] * x + I[1][1] * y + I[1][2]) / W]; };
+}
+function curveAt(arr, n, t) { if (!arr) return 0; const f = Math.max(0, Math.min(n - 1, t * n - 0.5)); const i = Math.min(n - 2, f | 0), a = f - i; return arr[i] * (1 - a) + arr[i + 1] * a; }
+function rotateCurve(c, dir) {
+  if (!c) return null; const rev = a => a ? a.slice().reverse() : null, neg = a => a ? a.map(v => -v) : null;
+  return dir > 0 ? { t: rev(c.l), b: rev(c.r), l: neg(c.b), r: neg(c.t), n: c.n } : { t: neg(c.r), b: neg(c.l), l: rev(c.t), r: rev(c.b), n: c.n };
 }
 function polyArea(q) { let A = 0; for (let i = 0; i < 4; i++) { const p = q[i], r = q[(i + 1) % 4]; A += p.x * r.y - r.x * p.y; } return A / 2; }
 
@@ -459,10 +558,15 @@ function warp(p, W, H) {
   const sd = p.srcData.data, sw = p.src.width, sh = p.src.height;
   const M = quadMap(p.corners);
   const gray = new Uint8Array(W * H), col = new Uint8Array(W * H); // col: 0 none, 1 red, 2 other color
+  // bent-paper correction: shift each sample toward where the curved edge really runs
+  const cv = p.curve, Tx = new Float32Array(W), Bx = new Float32Array(W), Ly = new Float32Array(H), Ry = new Float32Array(H);
+  if (cv) { for (let x = 0; x < W; x++) { const u = (x + 0.5) / W; Tx[x] = curveAt(cv.t, cv.n, u); Bx[x] = curveAt(cv.b, cv.n, u); } for (let y = 0; y < H; y++) { const v = (y + 0.5) / H; Ly[y] = curveAt(cv.l, cv.n, v); Ry[y] = curveAt(cv.r, cv.n, v); } }
   for (let y = 0; y < H; y++) {
-    const v = (y + 0.5) / H;
+    const v0 = (y + 0.5) / H, ly = Ly[y], ry = Ry[y];
     for (let x = 0; x < W; x++) {
-      const u = (x + 0.5) / W; const z = M.g * u + M.h * v + 1;
+      const u0 = (x + 0.5) / W;
+      const u = u0 + (1 - u0) * ly + u0 * ry, v = v0 + (1 - v0) * Tx[x] + v0 * Bx[x];
+      const z = M.g * u + M.h * v + 1;
       let fx = (M.a * u + M.b * v + M.c) / z - 0.5, fy = (M.d * u + M.e * v + M.f) / z - 0.5;
       if (fx < 0) fx = 0; else if (fx > sw - 1.001) fx = sw - 1.001; if (fy < 0) fy = 0; else if (fy > sh - 1.001) fy = sh - 1.001;
       const ix = fx | 0, iy = fy | 0, ax = fx - ix, ay = fy - iy; const i0 = (iy * sw + ix) * 4, i1 = i0 + sw * 4;
@@ -550,6 +654,10 @@ function render(p) {
       const o = i * 4; out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
     }
   }
+  { // white out a thin border: paper edges and the table behind them often leave a dark line
+    const m = Math.round(Math.min(W, H) * 0.007);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { if (x >= m && x < W - m && y >= m && y < H - m) { x = W - m - 1; continue; } const o = (y * W + x) * 4; out[o] = out[o + 1] = out[o + 2] = 255; }
+  }
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   c.getContext("2d").putImageData(new ImageData(out, W, H), 0, 0);
   return c;
@@ -594,14 +702,14 @@ function openEditor() { if (cur < 0) return; $("#edTitle").textContent = `${cur 
 function setTab(t) {
   tab = t; $("#tabRes").classList.toggle("on", t === "res"); $("#tabCrop").classList.toggle("on", t === "crop");
   $("#viewRes").hidden = t !== "res"; $("#viewCrop").hidden = t !== "crop";
-  if (t === "res") showResult(); else { editCorners = pages[cur].corners.map(o => ({ ...o })); drawCrop(); }
+  if (t === "res") showResult(); else { editCorners = pages[cur].corners.map(o => ({ ...o })); editCurve = pages[cur].curve; drawCrop(); }
 }
 $("#tabRes").onclick = () => setTab("res"); $("#tabCrop").onclick = () => setTab("crop");
 function showResult() {
   const box = $("#resultBox"); box.textContent = ""; const p = pages[cur]; if (!p) return;
   if (p.out) box.appendChild(p.out); else { const d = document.createElement("p"); d.className = "empty"; d.textContent = "仕上げ中…"; box.appendChild(d); }
 }
-let editCorners = null, drag = -1, dispScale = 1, padPx = 0;
+let editCurve = null, editCorners = null, drag = -1, dispScale = 1, padPx = 0;
 const PAD = 18; // css px around the photo so corner handles stay visible
 function drawCrop() {
   const p = pages[cur]; if (!p) return; const cv = $("#cropCanvas");
@@ -628,15 +736,15 @@ function ptr(e) { const r = stage.getBoundingClientRect(); const k = stage.width
 stage.addEventListener("pointerdown", e => {
   const p = ptr(e); let bi = -1, bd = 1e9; const tol = 44 * (stage.width / stage.getBoundingClientRect().width) / dispScale;
   editCorners.forEach((o, i) => { const d = Math.hypot(o.x - p.x, o.y - p.y); if (d < bd) { bd = d; bi = i; } });
-  if (bd < tol * 1.6) { drag = bi; stage.setPointerCapture(e.pointerId); e.preventDefault(); drawCrop(); }
+  if (bd < tol * 1.6) { drag = bi; editCurve = null; stage.setPointerCapture(e.pointerId); e.preventDefault(); drawCrop(); }
 });
 stage.addEventListener("pointermove", e => { if (drag < 0) return; const p = ptr(e); const s = pages[cur].src; editCorners[drag] = { x: Math.max(0, Math.min(s.width, p.x)), y: Math.max(0, Math.min(s.height, p.y)) }; drawCrop(); });
 const endDrag = () => { if (drag >= 0) { drag = -1; drawCrop(); } };
 stage.addEventListener("pointerup", endDrag); stage.addEventListener("pointercancel", endDrag);
-$("#autoCorners").onclick = () => { editCorners = detectCorners(pages[cur].src); drawCrop(); };
-$("#fullCorners").onclick = () => { editCorners = fullCorners(pages[cur].src); drawCrop(); };
-$("#applyCrop").onclick = () => { const p = pages[cur]; p.corners = editCorners.map(o => ({ ...o })); process(p); setTab("res"); };
-function rotate(dir) { const p = pages[cur]; if (!p) return; const c = p.corners; p.corners = dir > 0 ? [c[3], c[0], c[1], c[2]] : [c[1], c[2], c[3], c[0]]; process(p); setTab("res"); }
+$("#autoCorners").onclick = () => { const d = detectCorners(pages[cur].src, 0, 0, 520); editCurve = d.curve || null; editCorners = d.map(o => ({ ...o })); drawCrop(); };
+$("#fullCorners").onclick = () => { editCorners = fullCorners(pages[cur].src); editCurve = null; drawCrop(); };
+$("#applyCrop").onclick = () => { const p = pages[cur]; p.corners = editCorners.map(o => ({ ...o })); p.curve = editCurve; process(p); setTab("res"); };
+function rotate(dir) { const p = pages[cur]; if (!p) return; const c = p.corners; p.corners = dir > 0 ? [c[3], c[0], c[1], c[2]] : [c[1], c[2], c[3], c[0]]; p.curve = rotateCurve(p.curve, dir); process(p); setTab("res"); }
 $("#rotR").onclick = () => rotate(1); $("#rotL").onclick = () => rotate(-1);
 $("#del").onclick = () => { if (cur < 0) return; pages.splice(cur, 1); cur = Math.min(cur, pages.length - 1); renderList(); if (cur >= 0) openEditor(); };
 let clearArm = 0;
@@ -691,19 +799,74 @@ function thumbOf(p) {
   const g = t.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(p.out, 0, 0, t.width, t.height);
   return t.toDataURL("image/jpeg", 0.7);
 }
-$("#savePdf").onclick = async () => {
+/* ---------- save / share / print ---------- */
+let shareSrc = null; const prepared = {};
+const curName = () => safeName($("#docName").value || "スキャン_" + stamp());
+const canvasToBlob = (c, q) => new Promise(res => c.toBlob(res, "image/jpeg", q || 0.9));
+async function pdfToJpgs(blob) { const cs = await loadPdf(blob); const out = []; for (const c of cs) out.push(await canvasToBlob(c, 0.9)); return out; }
+function openShare(src) {
+  shareSrc = src; prepared.pdf = prepared.jpg = null;
+  $("#shTitle").textContent = src.name; $("#shInfo").textContent = `${src.pages}ページ`;
+  document.querySelectorAll(".shbtn").forEach(b => { b.disabled = false; b.querySelector("span").textContent = b.dataset.label; });
+  $("#shPrint").hidden = inFrame; // Claude's viewer cannot open the print dialog
+  $("#shNote").textContent = inFrame ? "印刷は、PDFを保存してから「ファイル」アプリで開き、共有ボタンの「プリント」から行えます。" : "";
+  openSheet("#shareSheet");
+}
+async function shareFiles(files) {
+  const dl = await dlP;
+  if (dl) { for (const f of files) await dl.save({ filename: f.name, data: f }); toast("保存しました"); return; }
+  if (navigator.canShare && navigator.canShare({ files })) { await navigator.share({ files }); return; }
+  for (const f of files) { const a = document.createElement("a"); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000); }
+}
+async function prepare(kind) {
+  if (prepared[kind]) return prepared[kind];
+  const name = shareSrc.name;
+  if (kind === "pdf") prepared.pdf = [new File([await shareSrc.pdf()], `${name}.pdf`, { type: "application/pdf" })];
+  else { const bs = await shareSrc.jpgs(); prepared.jpg = bs.map((b, i) => new File([b], bs.length > 1 ? `${name}_${i + 1}.jpg` : `${name}.jpg`, { type: "image/jpeg" })); }
+  return prepared[kind];
+}
+async function doExport(kind, btn) {
+  const lab = btn.querySelector("span"); const label0 = btn.dataset.label;
+  try {
+    if (!prepared[kind]) { btn.disabled = true; lab.textContent = "準備中…"; await prepare(kind); btn.disabled = false; }
+    lab.textContent = label0; await shareFiles(prepared[kind]);
+  } catch (e) {
+    btn.disabled = false;
+    if (e && e.name === "NotAllowedError") { lab.textContent = "準備できました。もう一度タップ"; return; }
+    lab.textContent = label0;
+    if (e && (e.name === "AbortError" || e.code === "declined")) return;
+    if (e && e.code === "rate_limited") { toast("少し待ってからもう一度押してください"); return; }
+    console.error(e); toast("保存できませんでした");
+  }
+}
+async function doPrint(btn) {
+  const lab = btn.querySelector("span"); btn.disabled = true; lab.textContent = "準備中…";
+  try {
+    const files = await prepare("jpg"); const area = $("#printArea"); area.textContent = "";
+    for (const f of files) {
+      const bmp = await createImageBitmap(f); let url;
+      if (bmp.width > bmp.height) { // landscape page: turn it so it fills A4 portrait paper
+        const c = document.createElement("canvas"); c.width = bmp.height; c.height = bmp.width; const g = c.getContext("2d");
+        g.translate(c.width, 0); g.rotate(Math.PI / 2); g.drawImage(bmp, 0, 0); url = URL.createObjectURL(await canvasToBlob(c, 0.92));
+      } else url = URL.createObjectURL(f);
+      const img = new Image(); img.src = url; img.alt = ""; area.appendChild(img); await img.decode().catch(() => { });
+    }
+    btn.disabled = false; lab.textContent = btn.dataset.label;
+    window.print();
+  } catch (e) { console.error(e); btn.disabled = false; lab.textContent = btn.dataset.label; toast("印刷の準備ができませんでした"); }
+}
+$("#shPdf").onclick = e => doExport("pdf", e.currentTarget);
+$("#shJpg").onclick = e => doExport("jpg", e.currentTarget);
+$("#shPrint").onclick = e => doPrint(e.currentTarget);
+$("#shareCur").onclick = () => {
   const list = realPages().length ? realPages() : pages;
   if (!list.length) { toast("先にプリントを撮影してください"); return; }
-  const btn = $("#savePdf"); btn.disabled = true; btn.textContent = "作成中…";
-  try { const blob = await buildPdf(list); if (blob) await offer(`${safeName($("#docName").value || "スキャン_" + stamp())}.pdf`, blob); }
-  catch (e) { console.error(e); toast("PDFを作れませんでした"); }
-  btn.disabled = false; btn.textContent = "PDFを書き出す";
+  openShare({ name: curName(), pages: list.length, pdf: () => buildPdf(list), jpgs: async () => { await waitAll(); const out = []; for (const p of list) if (p.out) out.push(await canvasToBlob(p.out, 0.9)); return out; } });
 };
-$("#saveJpg").onclick = async () => {
-  const p = pages[cur]; if (!p) { toast("ページを選んでください"); return; }
-  await waitAll(); if (!p.out) return;
-  p.out.toBlob(b => offer(`${safeName($("#docName").value || "スキャン_" + stamp())}_${cur + 1}.jpg`, b), "image/jpeg", 0.9);
-};
+function shareItem(it) {
+  let pdfP = null; const getPdf = () => pdfP || (pdfP = libPdf(it).then(b => { if (!b) throw new Error("no pdf"); return b; }));
+  openShare({ name: safeName(it.name), pages: it.pages || 1, pdf: getPdf, jpgs: async () => pdfToJpgs(await getPdf()) });
+}
 $("#cam2").addEventListener("change", e => { handleFiles(e.target.files); e.target.value = ""; });
 $("#toSave").onclick = () => { $("#savePanel").scrollIntoView({ behavior: "smooth", block: "start" }); };
 
@@ -822,8 +985,8 @@ function renderLib() {
     (its.length ? its : ["未整理"]).forEach(t => { const p = document.createElement("span"); p.className = "pill"; p.textContent = t; pl.appendChild(p); });
     meta.append(nm, sub, pl);
     const acts = document.createElement("div"); acts.className = "cacts";
-    const bSh = document.createElement("button"); bSh.type = "button"; bSh.className = "iconbtn"; bSh.setAttribute("aria-label", "PDFを開く・共有"); bSh.innerHTML = ICON_SHARE;
-    bSh.onclick = async () => { bSh.disabled = true; try { const b = await libPdf(it); if (b) await offer(`${safeName(it.name)}.pdf`, b); } catch (e) { toast("PDFを取り出せませんでした"); } bSh.disabled = false; };
+    const bSh = document.createElement("button"); bSh.type = "button"; bSh.className = "iconbtn"; bSh.setAttribute("aria-label", "保存・印刷・共有"); bSh.innerHTML = ICON_SHARE;
+    bSh.onclick = () => shareItem(it);
     const bMore = document.createElement("button"); bMore.type = "button"; bMore.className = "iconbtn"; bMore.setAttribute("aria-label", "名前・タグ・削除"); bMore.innerHTML = ICON_MORE;
     bMore.onclick = () => openItem(it);
     acts.append(bSh, bMore);
@@ -934,7 +1097,8 @@ function drawLive(q, vw, vh) {
 function liveCapture(q) {
   const v = $("#liveVideo"); const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
   const c = canvasFromSource(v, vw, vh); const s = c.width / vw;
-  const corners = q && q.found ? q.map(p => ({ x: p.x * s, y: p.y * s })) : detectCorners(c);
+  let corners;
+  if (q && q.found) { corners = q.map(p => ({ x: p.x * s, y: p.y * s })); corners.curve = q.curve; } else corners = detectCorners(c, 0, 0, 520);
   addPage(c, false, null, corners);
   live.count++; live.armed = false; live.shotQ = q && q.found ? q : null; live.stable = 0;
   $("#liveCount").textContent = String(live.count); $("#liveDone").hidden = false;
