@@ -677,9 +677,22 @@ function render(p) {
     const qd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y), pc = p.corners;
     const srcLong = Math.max((qd(pc[0], pc[1]) + qd(pc[3], pc[2])) / 2, (qd(pc[0], pc[3]) + qd(pc[1], pc[2])) / 2);
     const res = srcLong / Math.max(W, H); // < 1 means the page was enlarged
-    const s = settings.strength; const Tc = Math.round(117 - s * 0.8 + Math.max(0, Math.min(15, (0.9 - res) * 60))); // core threshold
+    const s = settings.strength; const Tc = Math.round((s <= 50 ? 117 - s * 0.8 : 77 - (s - 50) * 0.45) + Math.max(0, Math.min(15, (0.9 - res) * 60))); // core threshold
     const Ts = 180; const core = new Uint8Array(n);
     for (let i = 0; i < n; i++) core[i] = L[i] < Tc ? 1 : 0;
+    // printed frames and rules: long straight horizontal/vertical runs are kept even when they are lighter than Tc,
+    // so strong erasing does not break them into dashes (handwriting is rarely that long and straight)
+    { const Tl = Math.max(Tc, Math.min(160, Math.round(117 + Math.max(0, Math.min(15, (0.9 - res) * 60))) + 25));
+      const minRun = Math.round(Math.min(W, H) * 0.06), gap = 4;
+      const scan = (len, cnt, idx) => { // runs of L<Tl along one line, bridging gaps up to `gap`
+        let st = -1, last = -1;
+        const flush = () => { if (st >= 0 && last - st + 1 >= minRun) for (let k = st; k <= last; k++) { const i = idx(k); if (L[i] < Tl) core[i] = 1; } };
+        for (let k = 0; k < len; k++) { if (L[idx(k)] < Tl) { if (st < 0 || k - last > gap + 1) { flush(); st = k; } last = k; } }
+        flush();
+      };
+      for (let y = 0; y < H; y++) scan(W, 0, k => y * W + k);
+      for (let x = 0; x < W; x++) scan(H, 0, k => k * W + x);
+    }
     // drop tiny isolated core specks (pencil dots, noise)
     // dilate core by 2px (separable)
     const r = res < 0.6 ? 3 : 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
