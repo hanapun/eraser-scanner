@@ -467,9 +467,34 @@ function detectCorners(c, cw, ch, maxSide) {
   const area = Math.abs(polyArea(q)); if (area < cw * ch * 0.15) return fallback();
   // the bright region must actually look like a quadrilateral
   if (bestSize / (area * s * s) < 0.85) return fallback();
+  // how much it looks like a printed sheet (used to keep auto capture from firing on walls, windows, desks...)
+  const stats = (() => {
+    const hi = new Uint32Array(256); let oS = 0, oN = 0, inN = 0; const e = 2, inC = i => lab[i] === bestId;
+    for (let i = 0; i < n; i++) {
+      if (!inC(i)) { oS += v[i]; oN++; continue; }
+      const x = i % w, y = (i / w) | 0; // skip the blurry rim of the sheet
+      if (x < e || y < e || x >= w - e || y >= h - e || !inC(i - e) || !inC(i + e) || !inC(i - e * w) || !inC(i + e * w)) continue;
+      hi[v[i]]++; inN++;
+    }
+    let acc = 0, med = 0; for (; med < 255; med++) { acc += hi[med]; if (acc >= inN / 2) break; }
+    let ink = 0; for (let k = 0; k < Math.max(0, med - 22); k++) ink += hi[k];
+    let bright = 0; for (let k = Math.max(0, med - 12); k < 256; k++) bright += hi[k];
+    return { area: area / (cw * ch), med, contrast: med - (oN ? oS / oN : 0), ink: ink / Math.max(1, inN), bright: bright / Math.max(1, inN) };
+  })();
   let out = q;
   try { out = refineQuad(lab, bestId, w, h, s, q) || q; } catch (e) { console.error(e); }
-  out.found = true; return out;
+  { const ang = [0, 1, 2, 3].map(k => { const p0 = out[(k + 3) % 4], p1 = out[k], p2 = out[(k + 1) % 4]; const ax = p0.x - p1.x, ay = p0.y - p1.y, bx = p2.x - p1.x, by = p2.y - p1.y; return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1)))) * 180 / Math.PI; });
+    const dd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const sw = (dd(out[0], out[1]) + dd(out[3], out[2])) / 2, sh = (dd(out[0], out[3]) + dd(out[1], out[2])) / 2;
+    Object.assign(stats, { angMin: Math.min(...ang), angMax: Math.max(...ang), aspect: Math.max(sw, sh) / Math.max(1, Math.min(sw, sh)) }); }
+  out.found = true; out.stats = stats; return out;
+}
+/* A detected quad is trusted for automatic capture only when it looks like a printed sheet:
+   bright and clearly lighter than its surroundings, with some ink on it, a sheet-like shape and near-right corners. */
+function paperLike(q) {
+  const t = q && q.found && q.stats; if (!t) return false;
+  return t.contrast >= 35 && t.med >= 120 && t.bright >= 0.55 && t.ink >= 0.005 && t.ink <= 0.4 &&
+    t.area <= 0.92 && t.angMin >= 62 && t.angMax <= 118 && t.aspect >= 1.15 && t.aspect <= 2.0;
 }
 /* Fit a straight line to each paper edge (sharper corners than the extreme points),
    then measure how far each edge bends away from that line (curled or wavy paper). */
@@ -652,12 +677,12 @@ function render(p) {
     const qd = (a, b) => Math.hypot(a.x - b.x, a.y - b.y), pc = p.corners;
     const srcLong = Math.max((qd(pc[0], pc[1]) + qd(pc[3], pc[2])) / 2, (qd(pc[0], pc[3]) + qd(pc[1], pc[2])) / 2);
     const res = srcLong / Math.max(W, H); // < 1 means the page was enlarged
-    const s = settings.strength; const Tc = Math.round(120 - s * 0.8 + Math.max(0, Math.min(35, (0.95 - res) * 90))); // core threshold
-    const Ts = 200; const core = new Uint8Array(n);
+    const s = settings.strength; const Tc = Math.round(117 - s * 0.8 + Math.max(0, Math.min(15, (0.9 - res) * 60))); // core threshold
+    const Ts = 180; const core = new Uint8Array(n);
     for (let i = 0; i < n; i++) core[i] = L[i] < Tc ? 1 : 0;
     // drop tiny isolated core specks (pencil dots, noise)
     // dilate core by 2px (separable)
-    const r = res < 0.75 ? 3 : 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
+    const r = res < 0.6 ? 3 : 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
     for (let y = 0; y < H; y++) { const row = y * W; for (let x = 0; x < W; x++) { let h = 0; for (let k = -r; k <= r && !h; k++) { const xx = x + k; if (xx >= 0 && xx < W) h = core[row + xx]; } tmp[row + x] = h; } }
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let h = 0; for (let k = -r; k <= r && !h; k++) { const yy = y + k; if (yy >= 0 && yy < H) h = tmp[yy * W + x]; } near[y * W + x] = h; }
     for (let i = 0; i < n; i++) {
@@ -1060,7 +1085,7 @@ $("#vScan").onclick = () => showView("scan"); $("#vLib").onclick = () => showVie
 const inFrame = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
 const live = { stream: null, timer: 0, prev: null, last: null, stable: 0, armed: true, miss: 0, shotQ: null, count: 0, multi: false };
 try { live.multi = localStorage.getItem("eraser-live-multi") === "1"; } catch (e) { }
-const NEED_STABLE = 4; // about one second of a steady frame
+const NEED_STABLE = 5; // about 1.25 s of a steady, paper-like frame
 const liveOK = !inFrame && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 function setLiveMode(multi) {
   live.multi = multi; $("#lmSingle").classList.toggle("on", !multi); $("#lmMulti").classList.toggle("on", multi);
@@ -1087,13 +1112,14 @@ function liveTick() {
   const v = $("#liveVideo"); const vw = v.videoWidth, vh = v.videoHeight;
   if (vw && vh) {
     const q = detectCorners(v, vw, vh, 240); delete q.curve; const diag = Math.hypot(vw, vh);
+    const odd = q.found && !paperLike(q); if (odd) q.found = false; // a bright shape that is not a printed sheet
     if (q.found) {
       live.stable = qDist(q, live.prev) < diag * 0.012 ? live.stable + 1 : 0; live.miss = 0;
       if (!live.armed && qDist(q, live.shotQ) > diag * 0.08) live.armed = true;
     } else { live.stable = 0; if (++live.miss >= 3) live.armed = true; }
     live.prev = q.found ? q : null; live.last = q;
     $("#liveRes").textContent = `映像 ${vw}×${vh}`;
-    $("#liveStatus").textContent = !q.found ? "用紙の全体がうつるようにしてください" : !live.armed ? "撮影しました。次の用紙に替えてください" : live.stable >= 1 ? "撮影しています…そのままで" : "用紙を見つけました";
+    $("#liveStatus").textContent = odd ? "紙ではないようです。プリント全体をうつしてください" : !q.found ? "用紙の全体がうつるようにしてください" : !live.armed ? "撮影しました。次の用紙に替えてください" : live.stable >= 1 ? "撮影しています…そのままで" : "用紙を見つけました";
     const k = live.armed && q.found ? Math.min(1, live.stable / NEED_STABLE) : 0;
     $("#ring").setAttribute("stroke-dashoffset", String(238.8 * (1 - k)));
     drawLive(q, vw, vh);
