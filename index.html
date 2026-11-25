@@ -693,7 +693,15 @@ function render(p) {
       for (let y = 0; y < H; y++) scan(W, 0, k => y * W + k);
       for (let x = 0; x < W; x++) scan(H, 0, k => k * W + x);
     }
-    // drop tiny isolated core specks (pencil dots, noise)
+    // drop tiny isolated core specks (leftover bits of pencil, dust): small and with no other ink close by
+    { const lab = new Int32Array(n), st = new Int32Array(n); const comps = []; let id = 0; const maxSz = Math.round(n * 0.000006), R = Math.round(Math.min(W, H) * 0.025);
+      for (let i0 = 0; i0 < n; i0++) { if (!core[i0] || lab[i0]) continue; id++; let sp = 0, sz = 0, x0 = W, x1 = 0, y0 = H, y1 = 0; st[sp++] = i0; lab[i0] = id;
+        while (sp) { const q = st[--sp]; sz++; const x = q % W, y = (q / W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const j = yy * W + xx; if (core[j] && !lab[j]) { lab[j] = id; st[sp++] = j; } } }
+        if (sz <= maxSz) comps.push([id, x0, x1, y0, y1]); }
+      for (const [cid, x0, x1, y0, y1] of comps) { let alone = true;
+        for (let y = Math.max(0, y0 - R); y <= Math.min(H - 1, y1 + R) && alone; y++) for (let x = Math.max(0, x0 - R); x <= Math.min(W - 1, x1 + R); x++) { const j = y * W + x; if (core[j] && lab[j] !== cid) { alone = false; break; } }
+        if (alone) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const j = y * W + x; if (lab[j] === cid) core[j] = 0; } } }
     // dilate core by 2px (separable)
     const r = res < 0.6 ? 3 : 2; const tmp = new Uint8Array(n), near = new Uint8Array(n);
     for (let y = 0; y < H; y++) { const row = y * W; for (let x = 0; x < W; x++) { let h = 0; for (let k = -r; k <= r && !h; k++) { const xx = x + k; if (xx >= 0 && xx < W) h = core[row + xx]; } tmp[row + x] = h; } }
@@ -709,6 +717,14 @@ function render(p) {
   { // white out a thin border: paper edges and the table behind them often leave a dark line
     const m = Math.round(Math.min(W, H) * 0.007);
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { if (x >= m && x < W - m && y >= m && y < H - m) { x = W - m - 1; continue; } const o = (y * W + x) * 4; out[o] = out[o + 1] = out[o + 2] = 255; }
+    // dark wedges and edge shadows that reach the border (table showing past a slightly-off corner): follow them
+    // inward from the border, only within the page margin, and whiten them
+    const M = Math.round(Math.min(W, H) * 0.04), seen = new Uint8Array(n), st = new Int32Array(n); let sp = 0;
+    const dark = j => out[j * 4] < 200, inBand = (x, y) => x < M || y < M || x >= W - M || y >= H - M;
+    const seed = (x, y) => { const j = y * W + x; if (!seen[j] && dark(j)) { seen[j] = 1; st[sp++] = j; } };
+    for (let x = 0; x < W; x++) { seed(x, m); seed(x, H - 1 - m); } for (let y = 0; y < H; y++) { seed(m, y); seed(W - 1 - m, y); }
+    while (sp) { const j = st[--sp]; const x = j % W, y = (j / W) | 0; out[j * 4] = out[j * 4 + 1] = out[j * 4 + 2] = 255;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H || !inBand(xx, yy)) continue; const k = yy * W + xx; if (!seen[k] && dark(k)) { seen[k] = 1; st[sp++] = k; } } }
   }
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   c.getContext("2d").putImageData(new ImageData(out, W, H), 0, 0);
